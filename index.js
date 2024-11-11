@@ -424,10 +424,16 @@ bot.on('message', async (msg) => {
 // Issue management functions
 async function addIssue(name) {
     try {
-        // First create the issue
+        logger.debug(`Starting issue creation for: "${name}"`);
+        logger.debug(`Making POST request to: ${PLANE_BASE_URL}/workspaces/${WORKSPACE_SLUG}/projects/${PROJECT_ID}/issues/`);
+
+        // First create the issue with TODO state
         const createResponse = await axios.post(
             `${PLANE_BASE_URL}/workspaces/${WORKSPACE_SLUG}/projects/${PROJECT_ID}/issues/`,
-            { name },
+            {
+                name,
+                state: TODO_STATE,
+            },
             {
                 headers: {
                     'x-api-key': PLANE_API_TOKEN,
@@ -436,9 +442,15 @@ async function addIssue(name) {
             }
         );
 
+        logger.debug(`Create issue response status: ${createResponse.status}`);
+        logger.debug(`Create issue response data: ${JSON.stringify(createResponse.data)}`);
+
         if (createResponse.status === 201) {
-            // Then add it to the cycle
             const issueId = createResponse.data.id;
+            logger.debug(`Issue created successfully with ID: ${issueId}`);
+            logger.debug(`Adding issue to cycle: ${CYCLE_ID}`);
+
+            // Then add it to the cycle
             const cycleResponse = await axios.post(
                 `${PLANE_BASE_URL}/workspaces/${WORKSPACE_SLUG}/projects/${PROJECT_ID}/cycles/${CYCLE_ID}/cycle-issues/`,
                 { issues: [issueId] },
@@ -450,13 +462,17 @@ async function addIssue(name) {
                 }
             );
 
+            logger.debug(`Cycle addition response status: ${cycleResponse.status}`);
+            logger.debug(`Cycle addition response data: ${JSON.stringify(cycleResponse.data)}`);
+
             if (cycleResponse.status === 201) {
+                logger.debug(`Issue successfully added to cycle`);
                 return createResponse.data;
             }
         }
-        throw new Error('Failed to create issue');
     } catch (error) {
         logger.error(`Error creating issue: ${error.message}`);
+        logger.debug(`Full error details: ${JSON.stringify(error.response?.data || error)}`);
         throw error;
     }
 }
@@ -835,8 +851,8 @@ bot.on('callback_query', async (query) => {
             };
             const priority = priorityMap[priorityCode];
             try {
-                await editIssue(issueId, { priority });
-                await bot.sendMessage(chatId, '✅ Priority updated successfully!');
+                const updatedIssue = await editIssue(issueId, { priority });
+                await bot.sendMessage(chatId, `✅ Priority updated for "*${updatedIssue.name}*" to *${priority}*`, { parse_mode: 'Markdown' });
                 await refreshAllCaches();
             } catch (error) {
                 await bot.sendMessage(chatId, '❌ Failed to update priority.');
@@ -862,23 +878,27 @@ bot.on('callback_query', async (query) => {
         else if (data.startsWith('set_state_')) {
             const [, , issueId, state] = data.split('_');
             try {
+                let updatedIssue;
                 switch (state) {
                     case 'inprogress':
-                        await editIssue(issueId, { state: IN_PROGRESS_STATE });
+                        updatedIssue = await editIssue(issueId, { state: IN_PROGRESS_STATE });
+                        await bot.sendMessage(chatId, `🏃 Moved "*${updatedIssue.name}*" to *IN PROGRESS*`, { parse_mode: 'Markdown' });
                         break;
                     case 'todo':
-                        await editIssue(issueId, { state: TODO_STATE });
+                        updatedIssue = await editIssue(issueId, { state: TODO_STATE });
+                        await bot.sendMessage(chatId, `📋 Moved "*${updatedIssue.name}*" to *TODO*`, { parse_mode: 'Markdown' });
                         break;
                     case 'done':
-                        await editIssue(issueId, { state: DONE_STATE });
+                        updatedIssue = await editIssue(issueId, { state: DONE_STATE });
+                        await bot.sendMessage(chatId, `✅ Marked "*${updatedIssue.name}*" as *DONE*`, { parse_mode: 'Markdown' });
                         break;
                     case 'backlog':
-                        await editIssue(issueId, { state: BACKLOG_STATE });
+                        updatedIssue = await editIssue(issueId, { state: BACKLOG_STATE });
+                        await bot.sendMessage(chatId, `📝 Moved "*${updatedIssue.name}*" to *BACKLOG*`, { parse_mode: 'Markdown' });
                         break;
                     default:
                         throw new Error('Invalid state');
                 }
-                await bot.sendMessage(chatId, '✅ State updated successfully!');
                 await refreshAllCaches();
             } catch (error) {
                 await bot.sendMessage(chatId, '❌ Failed to update state.');
@@ -887,8 +907,19 @@ bot.on('callback_query', async (query) => {
         else if (data.startsWith('delete_issue_')) {
             const issueId = data.replace('delete_issue_', '');
             try {
+                // Get issue details before deletion
+                const response = await axios.get(
+                    `${PLANE_BASE_URL}/workspaces/${WORKSPACE_SLUG}/projects/${PROJECT_ID}/issues/${issueId}`,
+                    {
+                        headers: {
+                            'x-api-key': PLANE_API_TOKEN,
+                            'Content-Type': 'application/json'
+                        }
+                    }
+                );
+                const issueName = response.data.name;
                 await deleteIssue(issueId);
-                await bot.sendMessage(chatId, '✅ Issue deleted successfully!');
+                await bot.sendMessage(chatId, `✅ Deleted issue: "*${issueName}*"`, { parse_mode: 'Markdown' });
                 await refreshAllCaches();
             } catch (error) {
                 await bot.sendMessage(chatId, '❌ Failed to delete issue.');
@@ -898,17 +929,19 @@ bot.on('callback_query', async (query) => {
             const [, issueId, newState] = data.split('_');
             try {
                 const state = newState === 'done' ? DONE_STATE : TODO_STATE;
+                let updatedIssue;
                 switch (newState) {
                     case 'done':
-                        await editIssue(issueId, { state: DONE_STATE });
+                        updatedIssue = await editIssue(issueId, { state: DONE_STATE });
+                        await bot.sendMessage(chatId, `✅ Completed issue: "*${updatedIssue.name}*"`, { parse_mode: 'Markdown' });
                         break;
                     case 'todo':
-                        await editIssue(issueId, { state: TODO_STATE });
+                        updatedIssue = await editIssue(issueId, { state: TODO_STATE });
+                        await bot.sendMessage(chatId, `↩️ Moved issue back to TODO: "*${updatedIssue.name}*"`, { parse_mode: 'Markdown' });
                         break;
                     default:
                         throw new Error('Invalid state');
                 }
-                await bot.sendMessage(chatId, `✅ Issue marked as ${newState.toUpperCase()} successfully!`);
                 await refreshAllCaches();
             } catch (error) {
                 await bot.sendMessage(chatId, '❌ Failed to update issue state.');
@@ -943,18 +976,18 @@ bot.on('message', async (msg) => {
     try {
         if (state.state === 'awaiting_issue_name') {
             const newIssue = await addIssue(msg.text);
-            await bot.sendMessage(chatId, `✅ Issue "${newIssue.name}" created successfully!`);
-            await refreshAllCaches();
+            await bot.sendMessage(chatId, `✅ Issue "${msg.text}" created successfully!`);
         }
         else if (state.state === 'awaiting_new_name') {
             await editIssue(state.issueId, { name: msg.text });
             await bot.sendMessage(chatId, '✅ Issue name updated successfully!');
-            await refreshAllCaches();
         }
     } catch (error) {
+        logger.error(`Error handling message: ${error.message}`);
         await bot.sendMessage(chatId, '❌ An error occurred. Please try again.');
     }
 
+    await refreshAllCaches();
     // Clear conversation state
     conversationState.delete(chatId);
 });
@@ -1548,6 +1581,71 @@ const handleCompletedCommand = async (chatId) => {
         };
     }
 };
+
+// Register direct issue management commands
+bot.onText(/\/add/, async (msg) => {
+    const chatId = msg.chat.id;
+    logger.info(`Received /add command from chat ID: ${chatId}`);
+
+    conversationState.set(chatId, { state: 'awaiting_issue_name' });
+    await bot.sendMessage(chatId, 'Please enter the name of the new issue:');
+});
+
+bot.onText(/\/edit/, async (msg) => {
+    const chatId = msg.chat.id;
+    logger.info(`Received /edit command from chat ID: ${chatId}`);
+
+    try {
+        let statusData = cache.get('statusData');
+        if (!statusData) {
+            statusData = await refreshAllCaches();
+        }
+        const issues = statusData.allIssues;
+        const keyboard = issues.map(issue => ([{
+            text: issue.name,
+            callback_data: `edit_issue_${issue.id}`
+        }]));
+
+        await bot.sendMessage(
+            chatId,
+            'Select an issue to edit:',
+            {
+                reply_markup: { inline_keyboard: keyboard }
+            }
+        );
+    } catch (error) {
+        logger.error(`Error fetching issues for edit: ${error.message}`);
+        await bot.sendMessage(chatId, '❌ Failed to fetch issues. Please try again.');
+    }
+});
+
+bot.onText(/\/delete/, async (msg) => {
+    const chatId = msg.chat.id;
+    logger.info(`Received /delete command from chat ID: ${chatId}`);
+
+    try {
+        let statusData = cache.get('statusData');
+        if (!statusData) {
+            statusData = await refreshAllCaches();
+        }
+        const issues = statusData.allIssues;
+        const keyboard = issues.map(issue => ([{
+            text: `🗑️ ${issue.name}`,
+            callback_data: `delete_issue_${issue.id}`
+        }]));
+
+        await bot.sendMessage(
+            chatId,
+            'Select an issue to delete:',
+            {
+                reply_markup: { inline_keyboard: keyboard }
+            }
+        );
+    } catch (error) {
+        logger.error(`Error fetching issues for deletion: ${error.message}`);
+        await bot.sendMessage(chatId, '❌ Failed to fetch issues. Please try again.');
+    }
+});
 
 // Register the /completed command
 bot.onText(/\/completed/, async (msg) => {
