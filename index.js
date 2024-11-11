@@ -505,9 +505,9 @@ bot.on('message', async (msg) => {
 });
 
 // Issue management functions
-async function addIssue(name) {
+async function addIssue(name, priority = 'none') {
     try {
-        logger.debug(`Starting issue creation for: "${name}"`);
+        logger.debug(`Starting issue creation for: "${name}" with priority: ${priority}`);
         logger.debug(`Making POST request to: ${PLANE_BASE_URL}/workspaces/${WORKSPACE_SLUG}/projects/${PROJECT_ID}/issues/`);
 
         // First create the issue with TODO state
@@ -516,6 +516,7 @@ async function addIssue(name) {
             {
                 name,
                 state: states.unstarted?.id,
+                priority,
             },
             {
                 headers: {
@@ -1031,13 +1032,31 @@ bot.on('callback_query', async (query) => {
             }
         }
         else if (data === 'cancel_edit') {
-            conversationState.delete(chatId);
-            await bot.editMessageText('✖️ Edit cancelled', {
-                chat_id: chatId,
-                message_id: messageId
-            });
-        }
-
+                    conversationState.delete(chatId);
+                    await bot.editMessageText('✖️ Edit cancelled', {
+                        chat_id: chatId,
+                        message_id: messageId
+                    });
+                }
+                else if (data.startsWith('new_priority_')) {
+                    const state = conversationState.get(chatId);
+                    if (state?.state === 'awaiting_priority' && state.issueName) {
+                        const priority = data.replace('new_priority_', '');
+                        try {
+                            const newIssue = await addIssue(state.issueName, priority);
+                            await bot.sendMessage(
+                                chatId, 
+                                `✅ Issue "${state.issueName}" created successfully with ${getPriorityEmoji(priority)} priority!`
+                            );
+                            await refreshAllCaches();
+                        } catch (error) {
+                            logger.error(`Error creating issue: ${error.message}`);
+                            await bot.sendMessage(chatId, '❌ Failed to create issue. Please try again.');
+                        }
+                        conversationState.delete(chatId);
+                    }
+                }
+        
 
     } catch (error) {
         logger.error(`Error handling callback query: ${error.message}`);
@@ -1058,8 +1077,33 @@ bot.on('message', async (msg) => {
 
     try {
         if (state.state === 'awaiting_issue_name') {
-            const newIssue = await addIssue(msg.text);
-            await bot.sendMessage(chatId, `✅ Issue "${msg.text}" created successfully!`);
+            // Store the name and move to priority selection
+            conversationState.set(chatId, { 
+                state: 'awaiting_priority',
+                issueName: msg.text 
+            });
+            
+            // Show priority selection keyboard
+            const keyboard = {
+                inline_keyboard: [
+                    [
+                        { text: '🔴 Urgent', callback_data: 'new_priority_urgent' },
+                        { text: '🟠 High', callback_data: 'new_priority_high' }
+                    ],
+                    [
+                        { text: '🟡 Medium', callback_data: 'new_priority_medium' },
+                        { text: '🟢 Low', callback_data: 'new_priority_low' }
+                    ],
+                    [{ text: '⚪ None', callback_data: 'new_priority_none' }]
+                ]
+            };
+
+            await bot.sendMessage(
+                chatId, 
+                'Please select the priority level:', 
+                { reply_markup: keyboard }
+            );
+            return; // Don't clear conversation state yet
         }
         else if (state.state === 'awaiting_new_name') {
             await editIssue(state.issueId, { name: msg.text });
