@@ -1,0 +1,29 @@
+{
+  "tasks": [
+    {
+      "id": "1",
+      "text": "Check email",
+      "completed": false
+    },
+    {
+      "id": "2",
+      "text": "Review PRs",
+      "completed": false
+    },
+    {
+      "id": "3",
+      "text": "Update task board",
+      "completed": false
+    },
+    {
+      "id": "4",
+      "text": "Handstand 1 min Lucy",
+      "completed": false
+    },
+    {
+      "id": "5",
+      "text": "Kiss Lucy",
+      "completed": false
+    }
+  ]
+}

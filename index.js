@@ -288,34 +288,44 @@ cron.schedule('0 0 * * *', async () => {
     logger.info('Daily tasks reset for new day');
 });
 
-// Handler for the /dailies command
-bot.onText(/\/dailies/, async (msg) => {
-    const chatId = msg.chat.id;
-    const dailyTasks = await loadDailyTasks();
-    
-    const keyboard = dailyTasks.tasks.map(task => ([{
-        text: `${task.completed ? '✅' : '⬜'} ${task.text}`,
-        callback_data: `toggle_daily_${task.id}`
-    }]));
-    
-    // Add management buttons
-    keyboard.push([
-        { text: '➕ Add Task', callback_data: 'add_daily' },
-        { text: '🗑️ Remove Task', callback_data: 'remove_daily' }
-    ]);
+// Handler function for dailies command
+const handleDailiesCommand = async (chatId) => {
+    logger.info(`Handling /dailies command for chat ID: ${chatId}`);
 
-    const message = '*📋 Daily Tasks:*\n\n' +
-        dailyTasks.tasks.map(task => 
-            `${task.completed ? '✅' : '⬜'} ${task.text}`
-        ).join('\n');
+    try {
+        const dailyTasks = await loadDailyTasks();
 
-    bot.sendMessage(chatId, message, {
-        parse_mode: 'Markdown',
-        reply_markup: {
-            inline_keyboard: keyboard
-        }
-    });
-});
+        const keyboard = dailyTasks.tasks.map(task => ([{
+            text: `${task.completed ? '✅' : '⬜'} ${task.text}`,
+            callback_data: `toggle_daily_${task.id}`
+        }]));
+
+        // Add management buttons
+        keyboard.push([
+            { text: '➕ Add Task', callback_data: 'add_daily' },
+            { text: '🗑️ Remove Task', callback_data: 'remove_daily' }
+        ]);
+
+        const message = '*📋 Daily Tasks:*\n\n' +
+            dailyTasks.tasks.map(task =>
+                `${task.completed ? '✅' : '⬜'} ${task.text}`
+            ).join('\n');
+
+        return {
+            success: true,
+            message,
+            keyboard
+        };
+    } catch (error) {
+        logger.error(`Error handling dailies command: ${error.message}`);
+        return {
+            success: false,
+            message: '❌ An error occurred while fetching daily tasks. Please try again later.'
+        };
+    }
+};
+
+
 
 // Handle callback queries for daily tasks
 bot.on('callback_query', async (query) => {
@@ -326,7 +336,7 @@ bot.on('callback_query', async (query) => {
     if (data.startsWith('toggle_daily_')) {
         const taskId = data.replace('toggle_daily_', '');
         const dailyTasks = await loadDailyTasks();
-        
+
         const taskIndex = dailyTasks.tasks.findIndex(t => t.id === taskId);
         if (taskIndex !== -1) {
             dailyTasks.tasks[taskIndex].completed = !dailyTasks.tasks[taskIndex].completed;
@@ -337,14 +347,14 @@ bot.on('callback_query', async (query) => {
                 text: `${task.completed ? '✅' : '⬜'} ${task.text}`,
                 callback_data: `toggle_daily_${task.id}`
             }]));
-            
+
             keyboard.push([
                 { text: '➕ Add Task', callback_data: 'add_daily' },
                 { text: '🗑️ Remove Task', callback_data: 'remove_daily' }
             ]);
 
             const message = '*📋 Daily Tasks:*\n\n' +
-                dailyTasks.tasks.map(task => 
+                dailyTasks.tasks.map(task =>
                     `${task.completed ? '✅' : '⬜'} ${task.text}`
                 ).join('\n');
 
@@ -378,10 +388,10 @@ bot.on('callback_query', async (query) => {
     } else if (data.startsWith('delete_daily_')) {
         const taskId = data.replace('delete_daily_', '');
         const dailyTasks = await loadDailyTasks();
-        
+
         dailyTasks.tasks = dailyTasks.tasks.filter(t => t.id !== taskId);
         await saveDailyTasks(dailyTasks.tasks);
-        
+
         await bot.sendMessage(chatId, 'Task removed! Use /dailies to see updated list.');
     }
 
@@ -397,7 +407,7 @@ bot.on('message', async (msg) => {
     if (isAddingDaily && msg.text && !msg.text.startsWith('/')) {
         const dailyTasks = await loadDailyTasks();
         const newId = (Math.max(...dailyTasks.tasks.map(t => parseInt(t.id)), 0) + 1).toString();
-        
+
         dailyTasks.tasks.push({
             id: newId,
             text: msg.text,
@@ -406,60 +416,620 @@ bot.on('message', async (msg) => {
 
         await saveDailyTasks(dailyTasks.tasks);
         cache.del(`adding_daily_${chatId}`);
-        
+
         await bot.sendMessage(chatId, 'Task added! Use /dailies to see updated list.');
     }
 });
 
+// Issue management functions
+async function addIssue(name) {
+    try {
+        // First create the issue
+        const createResponse = await axios.post(
+            `${PLANE_BASE_URL}/workspaces/${WORKSPACE_SLUG}/projects/${PROJECT_ID}/issues/`,
+            { name },
+            {
+                headers: {
+                    'x-api-key': PLANE_API_TOKEN,
+                    'Content-Type': 'application/json'
+                }
+            }
+        );
+
+        if (createResponse.status === 201) {
+            // Then add it to the cycle
+            const issueId = createResponse.data.id;
+            const cycleResponse = await axios.post(
+                `${PLANE_BASE_URL}/workspaces/${WORKSPACE_SLUG}/projects/${PROJECT_ID}/cycles/${CYCLE_ID}/cycle-issues/`,
+                { issues: [issueId] },
+                {
+                    headers: {
+                        'x-api-key': PLANE_API_TOKEN,
+                        'Content-Type': 'application/json'
+                    }
+                }
+            );
+
+            if (cycleResponse.status === 201) {
+                return createResponse.data;
+            }
+        }
+        throw new Error('Failed to create issue');
+    } catch (error) {
+        logger.error(`Error creating issue: ${error.message}`);
+        throw error;
+    }
+}
+
+async function editIssue(issueId, updates) {
+    try {
+        const response = await axios.patch(
+            `${PLANE_BASE_URL}/workspaces/${WORKSPACE_SLUG}/projects/${PROJECT_ID}/issues/${issueId}`,
+            updates,
+            {
+                headers: {
+                    'x-api-key': PLANE_API_TOKEN,
+                    'Content-Type': 'application/json'
+                }
+            }
+        );
+        return response.data;
+    } catch (error) {
+        logger.error(`Error editing issue: ${error.message}`);
+        throw error;
+    }
+}
+
+async function deleteIssue(issueId) {
+    try {
+        await axios.delete(
+            `${PLANE_BASE_URL}/workspaces/${WORKSPACE_SLUG}/projects/${PROJECT_ID}/issues/${issueId}`,
+            {
+                headers: {
+                    'x-api-key': PLANE_API_TOKEN
+                }
+            }
+        );
+        return true;
+    } catch (error) {
+        logger.error(`Error deleting issue: ${error.message}`);
+        throw error;
+    }
+}
+
+// Handler for the /manage_issues command
+// Handler for managing issues
+const handleManageCommand = async (chatId) => {
+    logger.info(`Handling /manage command for chat ID: ${chatId}`);
+
+    try {
+        const keyboard = {
+            inline_keyboard: [
+                [{ text: '➕ Add New Issue', callback_data: 'add_issue' }],
+                [{ text: '✏️ Edit Issue', callback_data: 'edit_issue_list' }],
+                [{ text: '🗑️ Delete Issue', callback_data: 'delete_issue_list' }]
+            ]
+        };
+
+        const managementMessage = {
+            success: true,
+            message: '*Issue Management*\nWhat would you like to do?',
+            keyboard: keyboard
+        };
+
+        const issues = await fetchSortedIssues();
+
+        if (issues.length > 0) {
+            const issueLines = issues.map(issue => {
+                const stateEmoji = issue.state === IN_PROGRESS_STATE ? '🏃' : '📋';
+                const priorityEmoji = getPriorityEmoji(issue.priority);
+                const updatedDate = new Date(issue.updated_at).toLocaleString();
+
+                return `${stateEmoji} ${priorityEmoji} *${issue.name}*\n   └ Updated: ${updatedDate}`;
+            });
+
+            managementMessage.issuesMessage = `\n📋 *Current Active Issues:*\n\n${issueLines.join('\n\n')}`;
+        }
+
+        return managementMessage;
+    } catch (error) {
+        logger.error(`Error handling manage command: ${error.message}`);
+        return {
+            success: false,
+            message: '❌ An error occurred while fetching issues. Please try again later.'
+        };
+    }
+};
+
+// Register the /manage command
+bot.onText(/\/manage/, async (msg) => {
+    const chatId = msg.chat.id;
+
+    // Send initial processing message
+    await bot.sendMessage(chatId, 'Loading issue management options, please wait...');
+
+    // Handle the command
+    const result = await handleManageCommand(chatId);
+
+    // Send the management options
+    await bot.sendMessage(
+        chatId,
+        result.message,
+        {
+            parse_mode: 'Markdown',
+            reply_markup: result.success ? result.keyboard : undefined
+        }
+    );
+
+    // Send the current issues list if available
+    if (result.success && result.issuesMessage) {
+        await bot.sendMessage(
+            chatId,
+            result.issuesMessage,
+            { parse_mode: 'Markdown' }
+        );
+    }
+});
+
+// Add issue conversation state management
+const conversationState = new Map();
+
+// Handle callback queries for help commands and issue management
+bot.on('callback_query', async (query) => {
+    const chatId = query.message.chat.id;
+    const msg = query.message;
+    try {
+        // Handle command callbacks from help menu
+        if (query.data.startsWith('/')) {
+            let result;;
+            switch (query.data) {
+                case '/issues':
+                    // Send initial processing message
+                    await bot.sendMessage(chatId, 'Fetching latest todo & inprogress issues, please wait...');
+
+                    // Handle the command
+                    result = await handleIssuesCommand(chatId);
+
+                    // Send the response
+                    await bot.sendMessage(
+                        chatId,
+                        result.message,
+                        result.success ? { parse_mode: 'Markdown' } : {}
+                    );
+                    break;
+                case '/status':
+
+                    // Send initial processing message
+                    await bot.sendMessage(chatId, 'Fetching project status, please wait...');
+
+                    // Handle the command
+                    result = await handleStatusCommand(chatId);
+
+                    // Send the response
+                    try {
+                        await bot.sendMessage(
+                            chatId,
+                            result.message,
+                            result.success ? { parse_mode: 'Markdown' } : {}
+                        );
+                    } catch (error) {
+                        if (error.code === 'ETELEGRAM' && error.response?.statusCode === 400) {
+                            logger.warn(`Failed to send status message: ${error.message}`);
+                            // Try sending without markdown if parsing failed
+                            try {
+                                await bot.sendMessage(chatId, result.message.replace(/[*_`]/g, ''));
+                            } catch (retryError) {
+                                logger.error(`Failed to send plain text message: ${retryError.message}`);
+                            }
+                        }
+                    }
+                    break;
+                case '/dailies':
+                    // Send initial processing message
+                    await bot.sendMessage(chatId, 'Fetching daily tasks, please wait...');
+
+                    // Handle the command
+                    result = await handleDailiesCommand(chatId);
+
+                    // Send the response
+                    await bot.sendMessage(
+                        chatId,
+                        result.message,
+                        {
+                            parse_mode: 'Markdown',
+                            reply_markup: result.success ? {
+                                inline_keyboard: result.keyboard
+                            } : undefined
+                        }
+                    );
+
+                    break;
+                case '/completed':
+                    // Send initial processing message
+                    await bot.sendMessage(chatId, 'Fetching completed issues, please wait...');
+
+                    // Handle the command
+                    result = await handleCompletedCommand(chatId);
+
+                    // Send the response
+                    await bot.sendMessage(
+                        chatId,
+                        result.message,
+                        result.success ? { parse_mode: 'Markdown' } : {}
+                    );
+                    break;
+                case '/stats':
+                    // Send initial processing message
+                    await bot.sendMessage(chatId, 'Calculating project statistics, please wait...');
+
+                    // Handle the command
+                    result = await handleStatsCommand(chatId);
+
+                    // Send the response
+                    await bot.sendMessage(
+                        chatId,
+                        result.message,
+                        result.success ? { parse_mode: 'Markdown' } : {}
+                    );
+                    break;
+                case '/manage':
+                    // Send initial processing message
+                    await bot.sendMessage(chatId, 'Loading issue management options, please wait...');
+
+                    // Handle the command
+                    result = await handleManageCommand(chatId);
+
+                    // Send the management options
+                    await bot.sendMessage(
+                        chatId,
+                        result.message,
+                        {
+                            parse_mode: 'Markdown',
+                            reply_markup: result.success ? result.keyboard : undefined
+                        }
+                    );
+
+                    // Send the current issues list if available
+                    if (result.success && result.issuesMessage) {
+                        await bot.sendMessage(
+                            chatId,
+                            result.issuesMessage,
+                            { parse_mode: 'Markdown' }
+                        );
+                    }
+                    break;
+                default:
+                    throw new Error('Invalid command');
+            }
+
+        }
+
+        // Answer callback query immediately to prevent timeout
+        await bot.answerCallbackQuery(query.id).catch(error => {
+            logger.warn(`Failed to answer callback query: ${error.message}`);
+        });
+
+        const messageId = query.message.message_id;
+        const data = query.data;
+
+        if (data === 'add_issue') {
+            conversationState.set(chatId, { state: 'awaiting_issue_name' });
+            await bot.sendMessage(chatId, 'Please enter the name of the new issue:');
+        }
+        else if (data === 'edit_issue_list' || data === 'delete_issue_list') {
+            try {
+                let statusData = cache.get('statusData');
+                if (!statusData) {
+                    statusData = await refreshAllCaches();
+                }
+                const issues = statusData.allIssues;
+                const keyboard = issues.map(issue => ([{
+                    text: issue.name,
+                    callback_data: `${data === 'edit_issue_list' ? 'edit' : 'delete'}_issue_${issue.id}`
+                }]));
+
+                await bot.editMessageText(
+                    `Select an issue to ${data === 'edit_issue_list' ? 'edit' : 'delete'}:`,
+                    {
+                        chat_id: chatId,
+                        message_id: messageId,
+                        reply_markup: { inline_keyboard: keyboard }
+                    }
+                );
+            } catch (error) {
+                logger.error(`Error fetching issues: ${error.message}`);
+                await bot.sendMessage(chatId, '❌ Failed to fetch issues. Please try again.');
+            }
+        }
+        else if (data.startsWith('edit_issue_')) {
+            const issueId = data.replace('edit_issue_', '');
+
+            try {
+                // Fetch current issue details
+                const response = await axios.get(
+                    `${PLANE_BASE_URL}/workspaces/${WORKSPACE_SLUG}/projects/${PROJECT_ID}/issues/${issueId}`,
+                    {
+                        headers: {
+                            'x-api-key': PLANE_API_TOKEN,
+                            'Content-Type': 'application/json'
+                        }
+                    }
+                );
+
+                const issue = response.data;
+                const priorityEmoji = getPriorityEmoji(issue.priority);
+                const stateEmoji = issue.state === IN_PROGRESS_STATE ? '🏃' :
+                    issue.state === TODO_STATE ? '📋' :
+                        issue.state === DONE_STATE ? '✅' : '📝';
+
+                conversationState.set(chatId, {
+                    state: 'awaiting_issue_edit',
+                    issueId: issueId
+                });
+                const isDone = issue.state === DONE_STATE;
+                const keyboard = {
+                    inline_keyboard: [
+                        [{ text: isDone ? '↩️ Mark as Todo' : '✅ Mark as Done', callback_data: `quick_toggle_${issueId}_${isDone ? 'todo' : 'done'}` }],
+                        [{ text: 'Edit Name', callback_data: `edit_name_${issueId}` }],
+                        [{ text: 'Edit Priority', callback_data: `edit_priority_${issueId}` }],
+                        [{ text: 'Edit State', callback_data: `edit_state_${issueId}` }],
+                        [{ text: '❌ Cancel', callback_data: 'cancel_edit' }]
+                    ]
+                };
+
+                const currentStatus = `*Current Issue Details:*\n` +
+                    `Name: ${issue.name}\n` +
+                    `Priority: ${priorityEmoji} ${issue.priority || 'none'}\n` +
+                    `State: ${stateEmoji}\n\n` +
+                    `What would you like to edit?`;
+
+                await bot.editMessageText(currentStatus, {
+                    chat_id: chatId,
+                    message_id: messageId,
+                    parse_mode: 'Markdown',
+                    reply_markup: keyboard
+                });
+            } catch (error) {
+                logger.error(`Error fetching issue details: ${error.message}`);
+                await bot.sendMessage(chatId, '❌ Failed to fetch issue details. Please try again.');
+            }
+        }
+        else if (data.startsWith('edit_name_')) {
+            const issueId = data.replace('edit_name_', '');
+            conversationState.set(chatId, {
+                state: 'awaiting_new_name',
+                issueId: issueId
+            });
+            await bot.sendMessage(chatId, 'Please enter the new name for the issue:');
+        }
+        else if (data.startsWith('edit_priority_')) {
+            const issueId = data.replace('edit_priority_', '');
+            const keyboard = {
+                inline_keyboard: [
+                    [
+                        { text: '🔴 Urgent', callback_data: `p_${issueId}_u` },
+                        { text: '🟠 High', callback_data: `p_${issueId}_h` }
+                    ],
+                    [
+                        { text: '🟡 Medium', callback_data: `p_${issueId}_m` },
+                        { text: '🟢 Low', callback_data: `p_${issueId}_l` }
+                    ],
+                    [{ text: '⚪ None', callback_data: `p_${issueId}_n` }]
+                ]
+            };
+
+            await bot.editMessageText('Select the new priority:', {
+                chat_id: chatId,
+                message_id: messageId,
+                reply_markup: keyboard
+            });
+        }
+        else if (data.startsWith('p_')) {
+            const [, issueId, priorityCode] = data.split('_');
+            const priorityMap = {
+                'u': 'urgent',
+                'h': 'high',
+                'm': 'medium',
+                'l': 'low',
+                'n': 'none'
+            };
+            const priority = priorityMap[priorityCode];
+            try {
+                await editIssue(issueId, { priority });
+                await bot.sendMessage(chatId, '✅ Priority updated successfully!');
+                await refreshAllCaches();
+            } catch (error) {
+                await bot.sendMessage(chatId, '❌ Failed to update priority.');
+            }
+        }
+        else if (data.startsWith('edit_state_')) {
+            const issueId = data.replace('edit_state_', '');
+            const keyboard = {
+                inline_keyboard: [
+                    [{ text: '🏃 In Progress', callback_data: `set_state_${issueId}_inprogress` }],
+                    [{ text: '📋 Todo', callback_data: `set_state_${issueId}_todo` }],
+                    [{ text: '✅ Done', callback_data: `set_state_${issueId}_done` }],
+                    [{ text: '📝 Backlog', callback_data: `set_state_${issueId}_backlog` }]
+                ]
+            };
+
+            await bot.editMessageText('Select the new state:', {
+                chat_id: chatId,
+                message_id: messageId,
+                reply_markup: keyboard
+            });
+        }
+        else if (data.startsWith('set_state_')) {
+            const [, , issueId, state] = data.split('_');
+            try {
+                switch (state) {
+                    case 'inprogress':
+                        await editIssue(issueId, { state: IN_PROGRESS_STATE });
+                        break;
+                    case 'todo':
+                        await editIssue(issueId, { state: TODO_STATE });
+                        break;
+                    case 'done':
+                        await editIssue(issueId, { state: DONE_STATE });
+                        break;
+                    case 'backlog':
+                        await editIssue(issueId, { state: BACKLOG_STATE });
+                        break;
+                    default:
+                        throw new Error('Invalid state');
+                }
+                await bot.sendMessage(chatId, '✅ State updated successfully!');
+                await refreshAllCaches();
+            } catch (error) {
+                await bot.sendMessage(chatId, '❌ Failed to update state.');
+            }
+        }
+        else if (data.startsWith('delete_issue_')) {
+            const issueId = data.replace('delete_issue_', '');
+            try {
+                await deleteIssue(issueId);
+                await bot.sendMessage(chatId, '✅ Issue deleted successfully!');
+                await refreshAllCaches();
+            } catch (error) {
+                await bot.sendMessage(chatId, '❌ Failed to delete issue.');
+            }
+        }
+        else if (data.startsWith('quick_toggle_')) {
+            const [, issueId, newState] = data.split('_');
+            try {
+                const state = newState === 'done' ? DONE_STATE : TODO_STATE;
+                switch (newState) {
+                    case 'done':
+                        await editIssue(issueId, { state: DONE_STATE });
+                        break;
+                    case 'todo':
+                        await editIssue(issueId, { state: TODO_STATE });
+                        break;
+                    default:
+                        throw new Error('Invalid state');
+                }
+                await bot.sendMessage(chatId, `✅ Issue marked as ${newState.toUpperCase()} successfully!`);
+                await refreshAllCaches();
+            } catch (error) {
+                await bot.sendMessage(chatId, '❌ Failed to update issue state.');
+            }
+        }
+        else if (data === 'cancel_edit') {
+            conversationState.delete(chatId);
+            await bot.editMessageText('✖️ Edit cancelled', {
+                chat_id: chatId,
+                message_id: messageId
+            });
+        }
+
+
+    } catch (error) {
+        logger.error(`Error handling callback query: ${error.message}`);
+        try {
+            await bot.sendMessage(chatId, '❌ An error occurred while processing your request. Please try again.');
+        } catch (sendError) {
+            logger.error(`Failed to send error message: ${sendError.message}`);
+        }
+    }
+});
+
+// Handle text messages for issue management
+bot.on('message', async (msg) => {
+    const chatId = msg.chat.id;
+    const state = conversationState.get(chatId);
+
+    if (!state || msg.text?.startsWith('/')) return;
+
+    try {
+        if (state.state === 'awaiting_issue_name') {
+            const newIssue = await addIssue(msg.text);
+            await bot.sendMessage(chatId, `✅ Issue "${newIssue.name}" created successfully!`);
+            await refreshAllCaches();
+        }
+        else if (state.state === 'awaiting_new_name') {
+            await editIssue(state.issueId, { name: msg.text });
+            await bot.sendMessage(chatId, '✅ Issue name updated successfully!');
+            await refreshAllCaches();
+        }
+    } catch (error) {
+        await bot.sendMessage(chatId, '❌ An error occurred. Please try again.');
+    }
+
+    // Clear conversation state
+    conversationState.delete(chatId);
+});
+
 // Handler for the /help command
-bot.onText(/\/help/, (msg) => {
+bot.onText(/\/help/, async (msg) => {
     const chatId = msg.chat.id;
     logger.info(`Received /help command from chat ID: ${chatId}`);
 
-    const helpMessage = `
-🤖 *Available Commands:*
+    const helpMessage = `🤖 *Command Reference*\n\nClick any command below to use it:`;
 
-📝 *Daily Tasks*
-/dailies - Manage your daily tasks
+    // Create inline keyboard with command buttons
+    const keyboard = {
+        inline_keyboard: [
+            // Daily Tasks section
+            [{ text: "📋 /dailies - Manage daily tasks", callback_data: "/dailies" }],
 
-📋 *Task Management*
-/issues - Show top 10 active tasks (in progress & todo)
-/completed - Show recently completed tasks
-/status - Show project status summary
+            // Task Management section
+            [{ text: "📋 /issues - Show active tasks", callback_data: "/issues" }],
+            [{ text: "✅ /completed - Show completed ", callback_data: "/completed" }],
+            [{ text: "📊 /status - Show project status", callback_data: "/status" }],
 
-📊 *Statistics*
-/stats - Show project statistics
+            // Statistics & Management section
+            [{ text: "📈 /stats - Show statistics", callback_data: "/stats" }],
+            [{ text: "🛠️ /manage - Manage issues", callback_data: "/manage" }],
+        ]
+    };
 
-ℹ️ *Other*
-/help - Show this help message
+    const legendMessage = `
+*Priority Levels:*
+🔴 \\- Urgent
+🟠 \\- High
+🟡 \\- Medium
+🟢 \\- Low
+⚪ \\- None
 
-*Priority Indicators:*
-🔴 Urgent
-🟠 High
-🟡 Medium
-🟢 Low
-⚪ None
+*Status Types:*
+🏃 \\- In Progress
+📋 \\- Todo
+✅ \\- Completed`;
 
-*Status Indicators:*
-🏃 In Progress
-📋 Todo
-✅ Completed
-`;
+    try {
+        // Send interactive command menu
+        await bot.sendMessage(chatId, helpMessage, {
+            parse_mode: 'MarkdownV2',
+            reply_markup: keyboard,
+            disable_web_page_preview: true
+        });
 
-    bot.sendMessage(chatId, helpMessage, { parse_mode: 'Markdown' });
+        // Send legend as a separate message
+        await bot.sendMessage(chatId, legendMessage, {
+            parse_mode: 'MarkdownV2',
+            disable_web_page_preview: true
+        });
+    } catch (error) {
+        if (error.code === 'ETELEGRAM' && error.response?.statusCode === 400) {
+            logger.warn(`Failed to send help message: ${error.message}`);
+            // Try sending without markdown formatting
+            try {
+                await bot.sendMessage(chatId, helpMessage.replace(/[*_`\\]/g, ''), {
+                    disable_web_page_preview: true
+                });
+            } catch (retryError) {
+                logger.error(`Failed to send plain help message: ${retryError.message}`);
+            }
+        } else {
+            logger.error(`Unexpected error: ${error.message}`);
+            throw error;
+        }
+    }
 });
 
 // Handler for the /status command
-
-
-// Handler for the /status command using cache
-bot.onText(/\/status/, async (msg) => {
-    const chatId = msg.chat.id;
-    const username = msg.from.username || msg.from.first_name;
-    logger.info(`Received /status command from user ${username} (chat ID: ${chatId})`);
-    logger.debug(`Full message details: ${JSON.stringify(msg)}`);
-
-    bot.sendMessage(chatId, 'Fetching project status, please wait...');
+const handleStatusCommand = async (chatId) => {
+    logger.info(`Handling /status command for chat ID: ${chatId}`);
 
     try {
         const cacheKey = 'statusData';
@@ -480,7 +1050,6 @@ bot.onText(/\/status/, async (msg) => {
             }
         };
 
-
         // Format today's issues
         const todayIssuesFormatted = (statusData.todayIssues || [])
             .map(issue => {
@@ -497,7 +1066,7 @@ bot.onText(/\/status/, async (msg) => {
             .map(task => `${task.completed ? '✅' : '⬜'} ${task.text}`)
             .join('\n');
 
-        const statusMessage = `
+        const message = `
 📊 *${PROJECT_NAME} Cycle Overview*
 
 🏃 In Progress: ${statusData.inProgress} tasks
@@ -516,21 +1085,75 @@ ${todayIssuesFormatted || "No issues updated today"}
 🕒 Last updated: ${new Date(statusData.timestamp).toLocaleString()}
 `;
 
-        bot.sendMessage(chatId, statusMessage, { parse_mode: 'Markdown' });
+        return { success: true, message };
     } catch (error) {
         logger.error(`Error fetching status: ${error.message}`);
-        bot.sendMessage(chatId, '❌ An error occurred while fetching project status.');
+        return {
+            success: false,
+            message: '❌ An error occurred while fetching project status.'
+        };
+    }
+};
+
+// Register the /status command
+bot.onText(/\/status/, async (msg) => {
+    const chatId = msg.chat.id;
+    const username = msg.from.username || msg.from.first_name;
+    logger.info(`Received /status command from user ${username} (chat ID: ${chatId})`);
+    logger.debug(`Full message details: ${JSON.stringify(msg)}`);
+
+    // Send initial processing message
+    await bot.sendMessage(chatId, 'Fetching project status, please wait...');
+
+    // Handle the command
+    const result = await handleStatusCommand(chatId);
+
+    // Send the response
+    try {
+        await bot.sendMessage(
+            chatId,
+            result.message,
+            result.success ? { parse_mode: 'Markdown' } : {}
+        );
+    } catch (error) {
+        if (error.code === 'ETELEGRAM' && error.response?.statusCode === 400) {
+            logger.warn(`Failed to send status message: ${error.message}`);
+            // Try sending without markdown if parsing failed
+            try {
+                await bot.sendMessage(chatId, result.message.replace(/[*_`]/g, ''));
+            } catch (retryError) {
+                logger.error(`Failed to send plain text message: ${retryError.message}`);
+            }
+        }
     }
 });
 
-// Handler for the /stats command
-bot.onText(/\/stats/, async (msg) => {
+// Register the /dailies command
+bot.onText(/\/dailies/, async (msg) => {
     const chatId = msg.chat.id;
-    const username = msg.from.username || msg.from.first_name;
-    logger.info(`Received /stats command from user ${username} (chat ID: ${chatId})`);
-    logger.debug(`Processing stats request at ${new Date().toISOString()}`);
 
-    bot.sendMessage(chatId, 'Calculating project statistics, please wait...');
+    // Send initial processing message
+    await bot.sendMessage(chatId, 'Fetching daily tasks, please wait...');
+
+    // Handle the command
+    const result = await handleDailiesCommand(chatId);
+
+    // Send the response
+    await bot.sendMessage(
+        chatId,
+        result.message,
+        {
+            parse_mode: 'Markdown',
+            reply_markup: result.success ? {
+                inline_keyboard: result.keyboard
+            } : undefined
+        }
+    );
+});
+
+// Handler for the /stats command
+const handleStatsCommand = async (chatId) => {
+    logger.info(`Handling /stats command for chat ID: ${chatId}`);
 
     try {
         // Get cached status data or refresh if needed
@@ -607,15 +1230,13 @@ bot.onText(/\/stats/, async (msg) => {
                 // Build message lines
                 let lines = [];
                 lines.push(`  ${stateEmoji} *${task.name}*`);
-                //lines.push(`    ├ ${priorityEmoji} ${priority}`);
-                //lines.push(`    ├ Due: 📅 ${targetDate}`);
                 lines.push(`    └ Updated: 🕒 ${updatedDate}`);
 
                 return lines.join('\n');
             }).join('\n\n');
         };
 
-        const statsMessage = `
+        const message = `
 📊 *${PROJECT_NAME} Dev Cycle Statistics*
 
 *Priority Distribution:*
@@ -644,76 +1265,117 @@ ${formatTasks(todoTasks)}
 ${formatTasks(doneTasks)}
 `;
 
-        bot.sendMessage(chatId, statsMessage, { parse_mode: 'Markdown' });
+        return { success: true, message };
     } catch (error) {
         logger.error(`Error fetching statistics: ${error.message}`);
-        bot.sendMessage(chatId, '❌ An error occurred while calculating project statistics.');
+        return {
+            success: false,
+            message: '❌ An error occurred while calculating project statistics.'
+        };
     }
+};
+
+// Register the /stats command
+bot.onText(/\/stats/, async (msg) => {
+    const chatId = msg.chat.id;
+    const username = msg.from.username || msg.from.first_name;
+    logger.info(`Received /stats command from user ${username} (chat ID: ${chatId})`);
+    logger.debug(`Processing stats request at ${new Date().toISOString()}`);
+
+    // Send initial processing message
+    await bot.sendMessage(chatId, 'Calculating project statistics, please wait...');
+
+    // Handle the command
+    const result = await handleStatsCommand(chatId);
+
+    // Send the response
+    await bot.sendMessage(
+        chatId,
+        result.message,
+        result.success ? { parse_mode: 'Markdown' } : {}
+    );
 });
 
-// Handler for the /issues command
-bot.onText(/\/issues/, async (msg) => {
-    const chatId = msg.chat.id;
-    logger.info(`Received /issues command from chat ID: ${chatId}`);
+// Format a single issue for display
+const formatIssue = (issue) => {
+    const stateEmoji = issue.state === IN_PROGRESS_STATE ? '🏃' : '📋';
+    const priorityEmojis = {
+        'urgent': '🔴',
+        'high': '🟠',
+        'medium': '🟡',
+        'low': '🟢',
+        'none': '⚪'
+    };
+    const priorityEmoji = priorityEmojis[issue.priority] || '⚪';
+    const priority = issue.priority.toUpperCase() || 'NONE';
 
-    // Notify the user that the bot is processing the request
-    bot.sendMessage(chatId, 'Fetching latest issues, please wait...');
+    const updatedDate = new Date(issue.updated_at).toLocaleString();
+    const targetDate = issue.target_date ? new Date(issue.target_date).toLocaleDateString() : 'No due date';
+
+    const lines = [];
+    lines.push(`${stateEmoji} *${issue.name}*`);
+    lines.push(`├ Priority: ${priorityEmoji} ${priority}`);
+    lines.push(`├ Due: 📅 ${targetDate}`);
+    lines.push(`├ Updated: 🕒 ${updatedDate}`);
+
+    if (issue.description_html) {
+        const plainDescription = issue.description_html.replace(/<[^>]*>/g, '').trim();
+        if (plainDescription) {
+            lines.push(`├ Description: 📝 ${plainDescription}`);
+        }
+    }
+
+    if (issue.assignees && issue.assignees.length > 0) {
+        lines.push(`└ Assignees: 👤 ${issue.assignees.join(', ')}`);
+    } else {
+        lines.push(`└ Assignees: 👤 Unassigned`);
+    }
+
+    return lines.join('\n');
+};
+
+// Handler for displaying active issues
+const handleIssuesCommand = async (chatId) => {
+    logger.info(`Handling /issues command for chat ID: ${chatId}`);
 
     try {
         const issues = await getIssuesDebounced();
 
         if (issues.length > 0) {
-            const issueLines = issues.map(issue => {
-                // Get state emoji
-                const stateEmoji = issue.state === IN_PROGRESS_STATE ? '🏃' : '📋';
-
-                // Get priority emoji and text
-                const priorityEmojis = {
-                    'urgent': '🔴',
-                    'high': '🟠',
-                    'medium': '🟡',
-                    'low': '🟢',
-                    'none': '⚪'
-                };
-                const priorityEmoji = priorityEmojis[issue.priority] || '⚪';
-                const priority = issue.priority.toUpperCase() || 'NONE';
-
-                // Format dates
-                const updatedDate = new Date(issue.updated_at).toLocaleString();
-                const targetDate = issue.target_date ? new Date(issue.target_date).toLocaleDateString() : 'No due date';
-
-                // Build message lines
-                let lines = [];
-                lines.push(`${stateEmoji} *${issue.name}*`);
-                lines.push(`├ Priority: ${priorityEmoji} ${priority}`);
-                lines.push(`├ Due: 📅 ${targetDate}`);
-                lines.push(`├ Updated: 🕒 ${updatedDate}`);
-
-                if (issue.description_html) {
-                    const plainDescription = issue.description_html.replace(/<[^>]*>/g, '').trim();
-                    if (plainDescription) {
-                        lines.push(`├ Description: 📝 ${plainDescription}`);
-                    }
-                }
-
-                if (issue.assignees && issue.assignees.length > 0) {
-                    lines.push(`└ Assignees: 👤 ${issue.assignees.join(', ')}`);
-                } else {
-                    lines.push(`└ Assignees: 👤 Unassigned`);
-                }
-
-                return lines.join('\n');
-            });
-
+            const issueLines = issues.map(formatIssue);
             const message = `🎯 *Top 10 Active Issues:*\n\n${issueLines.join('\n\n')}`;
-            bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+            return { success: true, message };
         } else {
-            bot.sendMessage(chatId, '⚠️ No active issues found in IN_PROGRESS or TODO state.');
+            return {
+                success: true,
+                message: '⚠️ No active issues found in IN_PROGRESS or TODO state.'
+            };
         }
     } catch (error) {
         logger.error(`Error fetching issues: ${error.message}`);
-        bot.sendMessage(chatId, '❌ An error occurred while fetching issues. Please try again later.');
+        return {
+            success: false,
+            message: '❌ An error occurred while fetching issues. Please try again later.'
+        };
     }
+};
+
+// Register the /issues command
+bot.onText(/\/issues/, async (msg) => {
+    const chatId = msg.chat.id;
+
+    // Send initial processing message
+    await bot.sendMessage(chatId, 'Fetching latest todo & inprogress issues, please wait...');
+
+    // Handle the command
+    const result = await handleIssuesCommand(chatId);
+
+    // Send the response
+    await bot.sendMessage(
+        chatId,
+        result.message,
+        result.success ? { parse_mode: 'Markdown' } : {}
+    );
 });
 
 
@@ -740,7 +1402,22 @@ cron.schedule('0 6 * * *', async () => {
         });
 
         const message = `🌅 *Good Morning! Here are the Active Issues:*\n\n${issueLines.join('\n\n')}`;
-        bot.sendMessage(DAILY_CHAT_ID, message, { parse_mode: 'Markdown' });
+        try {
+            await bot.sendMessage(DAILY_CHAT_ID, message, { parse_mode: 'Markdown' });
+        } catch (error) {
+            if (error.code === 'ETELEGRAM' && error.response?.statusCode === 400) {
+                logger.warn(`Failed to send daily update: ${error.message}`);
+                // Try sending without markdown if parsing failed
+                try {
+                    await bot.sendMessage(DAILY_CHAT_ID, message.replace(/[*_`]/g, ''));
+                } catch (retryError) {
+                    logger.error(`Failed to send plain daily update: ${retryError.message}`);
+                }
+            } else {
+                logger.error(`Unexpected error: ${error.message}`);
+                throw error;
+            }
+        }
     } else {
         bot.sendMessage(DAILY_CHAT_ID, '⚠️ No active issues found.');
     }
@@ -829,13 +1506,9 @@ ${todayIssuesFormatted || "No issues updated today"}${activeIssuesSection}`;
     }
 });
 
-// Handler for the /completed command
-bot.onText(/\/completed/, async (msg) => {
-    const chatId = msg.chat.id;
-    logger.info(`Received /completed command from chat ID: ${chatId}`);
-
-    // Notify the user that the bot is processing the request
-    bot.sendMessage(chatId, 'Fetching completed issues, please wait...');
+// Handler for displaying completed issues
+const handleCompletedCommand = async (chatId) => {
+    logger.info(`Handling /completed command for chat ID: ${chatId}`);
 
     try {
         // Get cached status data or refresh if needed
@@ -857,15 +1530,41 @@ bot.onText(/\/completed/, async (msg) => {
                 return `✅ ${priorityEmoji} *${issue.name}*\nCompleted: 🕒 ${completedDate}`;
             });
 
-            const message = `🎉 *Recently Completed Tasks:*\n\n${issueLines.join('\n\n')}`;
-            bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+            return {
+                success: true,
+                message: `🎉 *Recently Completed Tasks:*\n\n${issueLines.join('\n\n')}`
+            };
         } else {
-            bot.sendMessage(chatId, '📝 No completed tasks found.');
+            return {
+                success: true,
+                message: '📝 No completed tasks found.'
+            };
         }
     } catch (error) {
         logger.error(`Error fetching completed issues: ${error.message}`);
-        bot.sendMessage(chatId, '❌ An error occurred while fetching completed issues. Please try again later.');
+        return {
+            success: false,
+            message: '❌ An error occurred while fetching completed issues. Please try again later.'
+        };
     }
+};
+
+// Register the /completed command
+bot.onText(/\/completed/, async (msg) => {
+    const chatId = msg.chat.id;
+
+    // Send initial processing message
+    await bot.sendMessage(chatId, 'Fetching completed issues, please wait...');
+
+    // Handle the command
+    const result = await handleCompletedCommand(chatId);
+
+    // Send the response
+    await bot.sendMessage(
+        chatId,
+        result.message,
+        result.success ? { parse_mode: 'Markdown' } : {}
+    );
 });
 
 // Handle polling errors
