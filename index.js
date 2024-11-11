@@ -823,10 +823,13 @@ bot.on('callback_query', async (query) => {
                     statusData = await refreshAllCaches();
                 }
                 const issues = statusData.allIssues;
-                const keyboard = issues.map(issue => ([{
-                    text: issue.name,
-                    callback_data: `${data === 'edit_issue_list' ? 'edit' : 'delete'}_issue_${issue.id}`
-                }]));
+                const keyboard = issues
+                    .sort((a, b) => new Date(b.updated_at) - new Date(a.updated_at))
+                    .slice(0, 10)
+                    .map(issue => ([{
+                        text: issue.name,
+                        callback_data: `${data === 'edit_issue_list' ? 'edit' : 'delete'}_issue_${issue.id}`
+                    }]));
 
                 await bot.editMessageText(
                     `Select an issue to ${data === 'edit_issue_list' ? 'edit' : 'delete'}:`,
