@@ -10,11 +10,21 @@ import debounce from 'lodash.debounce';
 import fs from 'fs/promises';
 import path from 'path';
 
-// Constants for issue states
-const DONE_STATE = '68880c3d-6e08-4ab7-b93b-bc63560d5296';
-const IN_PROGRESS_STATE = '1683449c-bc79-4f7d-a0a9-877f4c90bd92';
-const TODO_STATE = '1683449c-bc79-4f7d-a0a9-877f4c90bd92';
-const BACKLOG_STATE = '5e3cde66-4fc5-4220-bb2c-7453ca5e83c3';
+// Setup Logger
+const logger = winston.createLogger({
+    level: process.env.LOG_LEVEL || 'debug',
+    format: winston.format.combine(
+        winston.format.timestamp(),
+        winston.format.printf(({ timestamp, level, message }) => `${timestamp} [${level.toUpperCase()}]: ${message}`)
+    ),
+    transports: [
+        new winston.transports.Console(),
+        new winston.transports.File({ filename: 'bot.log' })
+    ],
+});
+
+// Refresh states periodically (every 12 hours)
+cron.schedule('0 */12 * * *', fetchStates);
 
 // Helper function to get priority emoji
 const getPriorityEmoji = (priority) => {
@@ -28,18 +38,6 @@ const getPriorityEmoji = (priority) => {
     return emojis[priority] || '⚪';
 };
 
-// Setup Logger
-const logger = winston.createLogger({
-    level: process.env.LOG_LEVEL || 'debug',
-    format: winston.format.combine(
-        winston.format.timestamp(),
-        winston.format.printf(({ timestamp, level, message }) => `${timestamp} [${level.toUpperCase()}]: ${message}`)
-    ),
-    transports: [
-        new winston.transports.Console(),
-        new winston.transports.File({ filename: 'bot.log' })
-    ],
-});
 
 // Load environment variables
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -56,6 +54,88 @@ const PROJECT_NAME = process.env.PROJECT_NAME || 'TranslateMom';
 
 // Construct API URLs
 const PLANE_API_URL = `${PLANE_BASE_URL}/workspaces/${WORKSPACE_SLUG}/projects/${PROJECT_ID}/cycles/${CYCLE_ID}/cycle-issues/`;
+
+/**
+ * Global state configurations cache for issue states.
+ * @type {Object.<string, Object>}
+ * @property {Object} backlog - Backlog state configuration
+ * @property {Object} backlog.id - Unique identifier for backlog state
+ * @property {Object} backlog.name - Display name for backlog state
+ * @property {Object} backlog.group - Group name for backlog state
+ * @property {Object} unstarted - Unstarted state configuration
+ * @property {Object} unstarted.id - Unique identifier for unstarted state
+ * @property {Object} unstarted.name - Display name for unstarted state
+ * @property {Object} unstarted.group - Group name for unstarted state
+ * @property {Object} started - Started state configuration
+ * @property {Object} started.id - Unique identifier for started state
+ * @property {Object} started.name - Display name for started state
+ * @property {Object} started.group - Group name for started state
+ * @property {Object} completed - Completed state configuration
+ * @property {Object} completed.id - Unique identifier for completed state
+ * @property {Object} completed.name - Display name for completed state
+ * @property {Object} completed.group - Group name for completed state
+ * @property {Object} cancelled - Cancelled state configuration
+ * @property {Object} cancelled.id - Unique identifier for cancelled state
+ * @property {Object} cancelled.name - Display name for cancelled state
+ * @property {Object} cancelled.group - Group name for cancelled state
+ */
+let states = {};
+
+/**
+ * Fetches and caches issue states from the Plane API.
+ * State groups are: backlog, unstarted, started, completed, cancelled
+ * 
+ * @async
+ * @function fetchStates
+ * @returns {Promise<Object>} A promise that resolves to an object containing state configurations
+ * @property {Object} states.backlog - Backlog state configuration
+ * @property {Object} states.unstarted - Unstarted state configuration
+ * @property {Object} states.started - Started state configuration
+ * @property {Object} states.completed - Completed state configuration
+ * @property {Object} states.cancelled - Cancelled state configuration
+ * @throws {Error} If the API request fails or returns an invalid response
+ * 
+ * @example
+ * try {
+ *   const states = await fetchStates();
+ *   console.log(states.started.id); // Access started state ID
+ * } catch (error) {
+ *   console.error('Failed to fetch states:', error);
+ * }
+ */
+async function fetchStates() {
+    try {
+        const response = await axios.get(
+            `${PLANE_BASE_URL}/workspaces/${WORKSPACE_SLUG}/projects/${PROJECT_ID}/states/`,
+            {
+                headers: {
+                    'x-api-key': PLANE_API_TOKEN,
+                    'Content-Type': 'application/json'
+                }
+            }
+        );
+
+        if (response.status === 200) {
+            // Convert array to object with name keys for easy lookup
+            states = response.data.results.reduce((acc, state) => {
+                acc[state.group.toLowerCase()] = state;
+                return acc;
+            }, {});
+
+            logger.info('States fetched and cached successfully');
+            logger.debug(`States: ${JSON.stringify(states)}`);
+            return states;
+        }
+    } catch (error) {
+        logger.error(`Error fetching states: ${error.message}`);
+        throw error;
+    }
+}
+
+// Initialize states on startup
+await fetchStates().catch(error => {
+    logger.error(`Initial states fetch failed: ${error.message}`);
+});
 
 // Initialize persistent cache with a TTL of 5 minutes (300 seconds)
 import PersistentCache from './cache-manager.js';
@@ -111,10 +191,10 @@ async function refreshAllCaches() {
 
             // Update status cache
             const statusData = {
-                inProgress: detailedIssues.filter(issue => issue.state === IN_PROGRESS_STATE).length,
-                todo: detailedIssues.filter(issue => issue.state === TODO_STATE).length,
-                done: detailedIssues.filter(issue => issue.state === DONE_STATE).length,
-                backlog: detailedIssues.filter(issue => issue.state === BACKLOG_STATE).length,
+                inProgress: detailedIssues.filter(issue => issue.state === states.started?.id).length,
+                todo: detailedIssues.filter(issue => issue.state === states.unstarted?.id).length,
+                done: detailedIssues.filter(issue => issue.state === states.completed?.id).length,
+                backlog: detailedIssues.filter(issue => issue.state === states.backlog?.id).length,
                 total: detailedIssues.length,
                 timestamp: new Date(),
                 todayIssues: todayIssues.map(issue => ({
@@ -138,7 +218,7 @@ async function refreshAllCaches() {
             };
 
             const sortedIssues = detailedIssues
-                .filter(issue => issue.state === IN_PROGRESS_STATE || issue.state === TODO_STATE)
+                .filter(issue => issue.state === states.started?.id || issue.state === states.unstarted?.id)
                 .sort((a, b) => {
                     const priorityDiff = priorityOrder[b.priority] - priorityOrder[a.priority];
                     if (priorityDiff !== 0) return priorityDiff;
@@ -198,6 +278,7 @@ async function fetchSortedIssues() {
                 'Content-Type': 'application/json'
             }
         });
+        logger.debug(`Fetched ${response.data.results.length} issues from Plane API`);
 
         if (response.status === 200) {
             const issues = response.data.results;
@@ -205,7 +286,9 @@ async function fetchSortedIssues() {
             // Fetch detailed information for each issue with limited concurrency
             const detailedIssues = await Promise.all(
                 issues.map(issue => limit(async () => {
-                    const detailUrl = `https://todo.translate.mom/api/v1/workspaces/translatemom/projects/302657e0-d57e-4813-a9af-7e85d6f9f19e/issues/${issue.id}`;
+                    const detailUrl = `${PLANE_BASE_URL}/workspaces/${WORKSPACE_SLUG}/projects/${PROJECT_ID}/issues/${issue.id}`;
+                    logger.debug(`Fetching issue detail for ${issue.id}`);
+                    logger.debug(`Making GET request to: ${detailUrl}`);
                     try {
                         const detailResponse = await axios.get(detailUrl, {
                             headers: {
@@ -232,7 +315,7 @@ async function fetchSortedIssues() {
 
             // Filter for IN_PROGRESS and TODO issues, then sort
             const sortedIssues = detailedIssues
-                .filter(issue => issue.state === IN_PROGRESS_STATE || issue.state === TODO_STATE)
+                .filter(issue => issue.state === states.started?.id || issue.state === states.unstarted?.id)
                 .sort((a, b) => {
                     const priorityDiff = priorityOrder[b.priority] - priorityOrder[a.priority];
                     if (priorityDiff !== 0) return priorityDiff;
@@ -432,7 +515,7 @@ async function addIssue(name) {
             `${PLANE_BASE_URL}/workspaces/${WORKSPACE_SLUG}/projects/${PROJECT_ID}/issues/`,
             {
                 name,
-                state: TODO_STATE,
+                state: states.unstarted?.id,
             },
             {
                 headers: {
@@ -537,7 +620,7 @@ const handleManageCommand = async (chatId) => {
 
         if (issues.length > 0) {
             const issueLines = issues.map(issue => {
-                const stateEmoji = issue.state === IN_PROGRESS_STATE ? '🏃' : '📋';
+                const stateEmoji = issue.state === states.started?.id ? '🏃' : '📋';
                 const priorityEmoji = getPriorityEmoji(issue.priority);
                 const updatedDate = new Date(issue.updated_at).toLocaleString();
 
@@ -774,15 +857,15 @@ bot.on('callback_query', async (query) => {
 
                 const issue = response.data;
                 const priorityEmoji = getPriorityEmoji(issue.priority);
-                const stateEmoji = issue.state === IN_PROGRESS_STATE ? '🏃' :
-                    issue.state === TODO_STATE ? '📋' :
-                        issue.state === DONE_STATE ? '✅' : '📝';
+                const stateEmoji = issue.state === states.started?.id ? '🏃' :
+                    issue.state === states.unstarted?.id ? '📋' :
+                        issue.state === states.completed?.id ? '✅' : '📝';
 
                 conversationState.set(chatId, {
                     state: 'awaiting_issue_edit',
                     issueId: issueId
                 });
-                const isDone = issue.state === DONE_STATE;
+                const isDone = issue.state === states.completed?.id;
                 const keyboard = {
                     inline_keyboard: [
                         [{ text: isDone ? '↩️ Mark as Todo' : '✅ Mark as Done', callback_data: `quick_toggle_${issueId}_${isDone ? 'todo' : 'done'}` }],
@@ -881,19 +964,19 @@ bot.on('callback_query', async (query) => {
                 let updatedIssue;
                 switch (state) {
                     case 'inprogress':
-                        updatedIssue = await editIssue(issueId, { state: IN_PROGRESS_STATE });
+                        updatedIssue = await editIssue(issueId, { state: states.started?.id });
                         await bot.sendMessage(chatId, `🏃 Moved "*${updatedIssue.name}*" to *IN PROGRESS*`, { parse_mode: 'Markdown' });
                         break;
                     case 'todo':
-                        updatedIssue = await editIssue(issueId, { state: TODO_STATE });
+                        updatedIssue = await editIssue(issueId, { state: states.unstarted?.id });
                         await bot.sendMessage(chatId, `📋 Moved "*${updatedIssue.name}*" to *TODO*`, { parse_mode: 'Markdown' });
                         break;
                     case 'done':
-                        updatedIssue = await editIssue(issueId, { state: DONE_STATE });
+                        updatedIssue = await editIssue(issueId, { state: states.completed?.id });
                         await bot.sendMessage(chatId, `✅ Marked "*${updatedIssue.name}*" as *DONE*`, { parse_mode: 'Markdown' });
                         break;
                     case 'backlog':
-                        updatedIssue = await editIssue(issueId, { state: BACKLOG_STATE });
+                        updatedIssue = await editIssue(issueId, { state: states.backlog?.id });
                         await bot.sendMessage(chatId, `📝 Moved "*${updatedIssue.name}*" to *BACKLOG*`, { parse_mode: 'Markdown' });
                         break;
                     default:
@@ -928,15 +1011,15 @@ bot.on('callback_query', async (query) => {
         else if (data.startsWith('quick_toggle_')) {
             const [, issueId, newState] = data.split('_');
             try {
-                const state = newState === 'done' ? DONE_STATE : TODO_STATE;
+                const state = newState === 'done' ? states.completed?.id : states.unstarted?.id;
                 let updatedIssue;
                 switch (newState) {
                     case 'done':
-                        updatedIssue = await editIssue(issueId, { state: DONE_STATE });
+                        updatedIssue = await editIssue(issueId, { state: states.completed?.id });
                         await bot.sendMessage(chatId, `✅ Completed issue: "*${updatedIssue.name}*"`, { parse_mode: 'Markdown' });
                         break;
                     case 'todo':
-                        updatedIssue = await editIssue(issueId, { state: TODO_STATE });
+                        updatedIssue = await editIssue(issueId, { state: states.unstarted?.id });
                         await bot.sendMessage(chatId, `↩️ Moved issue back to TODO: "*${updatedIssue.name}*"`, { parse_mode: 'Markdown' });
                         break;
                     default:
@@ -1073,12 +1156,14 @@ const handleStatusCommand = async (chatId) => {
         }
 
         // Helper function to get state emoji
-        const getStateEmoji = (state) => {
-            switch (state) {
-                case IN_PROGRESS_STATE: return '🏃';
-                case TODO_STATE: return '📋';
-                case DONE_STATE: return '✅';
-                case BACKLOG_STATE: return '📝';
+        const getStateEmoji = (stateId) => {
+            const state = Object.values(states).find(s => s.id === stateId);
+            switch (state?.name.toLowerCase()) {
+                case 'in progress': return '🏃';
+                case 'todo': return '📋';
+                case 'done': return '✅';
+                case 'backlog': return '📝';
+                case 'cancelled': return '❌';
                 default: return '❓';
             }
         };
@@ -1225,17 +1310,17 @@ const handleStatsCommand = async (chatId) => {
 
         // Get recently updated tasks from statusData
         const inProgressTasks = issues
-            .filter(i => i.state === IN_PROGRESS_STATE)
+            .filter(i => i.state === states.started?.id)
             .sort((a, b) => new Date(b.updated_at) - new Date(a.updated_at))
             .slice(0, 5);
 
         const todoTasks = issues
-            .filter(i => i.state === TODO_STATE)
+            .filter(i => i.state === states.unstarted?.id)
             .sort((a, b) => new Date(b.updated_at) - new Date(a.updated_at))
             .slice(0, 5);
 
         const doneTasks = issues
-            .filter(i => i.state === DONE_STATE)
+            .filter(i => i.state === states.completed?.id)
             .sort((a, b) => new Date(b.updated_at) - new Date(a.updated_at))
             .slice(0, 5);
 
@@ -1243,7 +1328,7 @@ const handleStatsCommand = async (chatId) => {
         const formatTasks = (tasks) => {
             return tasks.map(task => {
                 // Get state emoji
-                const stateEmoji = task.state === IN_PROGRESS_STATE ? '🏃' : '📋';
+                const stateEmoji = task.state === states.started?.id ? '🏃' : '📋';
 
                 // Get priority emoji
                 const priorityEmojis = {
@@ -1331,7 +1416,7 @@ bot.onText(/\/stats/, async (msg) => {
 
 // Format a single issue for display
 const formatIssue = (issue) => {
-    const stateEmoji = issue.state === IN_PROGRESS_STATE ? '🏃' : '📋';
+    const stateEmoji = issue.state === states.started?.id ? '🏃' : '📋';
     const priorityEmojis = {
         'urgent': '🔴',
         'high': '🟠',
@@ -1403,12 +1488,24 @@ bot.onText(/\/issues/, async (msg) => {
     // Handle the command
     const result = await handleIssuesCommand(chatId);
 
-    // Send the response
-    await bot.sendMessage(
-        chatId,
-        result.message,
-        result.success ? { parse_mode: 'Markdown' } : {}
-    );
+    try {
+        // Send the response
+        await bot.sendMessage(
+            chatId,
+            result.message,
+            result.success ? { parse_mode: 'Markdown' } : {}
+        );
+    } catch (error) {
+        if (error.code === 'ETELEGRAM' && error.response?.statusCode === 400) {
+            logger.warn(`Failed to send issues message: ${error.message}`);
+            // Try sending without markdown if parsing failed
+            try {
+                await bot.sendMessage(chatId, result.message.replace(/[*_`]/g, ''));
+            } catch (retryError) {
+                logger.error(`Failed to send plain issues message: ${retryError.message}`);
+            }
+        }
+    }
 });
 
 
@@ -1421,7 +1518,7 @@ cron.schedule('0 6 * * *', async () => {
 
     if (issues.length > 0) {
         const issueLines = issues.map(issue => {
-            const stateEmoji = issue.state === IN_PROGRESS_STATE ? '🏃' : '📋';
+            const stateEmoji = issue.state === states.started?.id ? '🏃' : '📋';
             const priorityEmojis = {
                 'urgent': '🔴',
                 'high': '🟠',
@@ -1470,10 +1567,10 @@ cron.schedule('20 21 * * *', async () => {
         // Format status message
         const getStateEmoji = (state) => {
             switch (state) {
-                case IN_PROGRESS_STATE: return '🏃';
-                case TODO_STATE: return '📋';
-                case DONE_STATE: return '✅';
-                case BACKLOG_STATE: return '📝';
+                case states.started?.id: return '🏃';
+                case states.unstarted?.id: return '📋';
+                case states.completed?.id: return '✅';
+                case states.backlog?.id: return '📝';
                 default: return '❓';
             }
         };
@@ -1490,7 +1587,7 @@ cron.schedule('20 21 * * *', async () => {
         let activeIssuesSection = '';
         if (issues.length > 0) {
             const issueLines = issues.map(issue => {
-                const stateEmoji = issue.state === IN_PROGRESS_STATE ? '🏃' : '📋';
+                const stateEmoji = issue.state === states.inprogress.id ? '🏃' : '📋';
                 const priorityEmojis = {
                     'urgent': '🔴',
                     'high': '🟠',
@@ -1552,7 +1649,7 @@ const handleCompletedCommand = async (chatId) => {
         }
 
         const completedIssues = statusData.allIssues
-            .filter(issue => issue.state === DONE_STATE)
+            .filter(issue => issue.state === states.completed?.id)
             .sort((a, b) => new Date(b.updated_at) - new Date(a.updated_at))
             .slice(0, 10); // Get top 10 most recently completed
 
