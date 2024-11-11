@@ -24,6 +24,12 @@ class PersistentCache {
         return this.cache.get(key);
     }
 
+    del(key) {
+        const result = this.cache.del(key);
+        this.saveToDisk();
+        return result;
+    }
+
     saveToDisk() {
         try {
             const data = {};

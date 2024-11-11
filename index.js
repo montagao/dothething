@@ -7,11 +7,13 @@ import winston from 'winston';
 import pLimit from 'p-limit';
 import axiosRetry from 'axios-retry';
 import debounce from 'lodash.debounce';
+import fs from 'fs/promises';
+import path from 'path';
 
 // Constants for issue states
-const DONE_STATE = 'e529a012-cd83-4795-ae06-5379ea11e292';
-const IN_PROGRESS_STATE = '6a71a723-cb2c-4d77-8fb3-c10e613ee53e';
-const TODO_STATE = 'f9cb45cb-6c78-4c33-bc17-7dbb1c0dbb83';
+const DONE_STATE = '68880c3d-6e08-4ab7-b93b-bc63560d5296';
+const IN_PROGRESS_STATE = '1683449c-bc79-4f7d-a0a9-877f4c90bd92';
+const TODO_STATE = '1683449c-bc79-4f7d-a0a9-877f4c90bd92';
 const BACKLOG_STATE = '5e3cde66-4fc5-4220-bb2c-7453ca5e83c3';
 
 // Helper function to get priority emoji
@@ -49,6 +51,8 @@ const PLANE_BASE_URL = process.env.PLANE_BASE_URL || 'https://todo.translate.mom
 const WORKSPACE_SLUG = process.env.PLANE_WORKSPACE_SLUG || 'translatemom';
 const PROJECT_ID = process.env.PLANE_PROJECT_ID || '302657e0-d57e-4813-a9af-7e85d6f9f19e';
 const CYCLE_ID = process.env.PLANE_CYCLE_ID || '7972997d-441d-472e-b080-38808863a3d5';
+
+const PROJECT_NAME = process.env.PROJECT_NAME || 'TranslateMom';
 
 // Construct API URLs
 const PLANE_API_URL = `${PLANE_BASE_URL}/workspaces/${WORKSPACE_SLUG}/projects/${PROJECT_ID}/cycles/${CYCLE_ID}/cycle-issues/`;
@@ -257,6 +261,156 @@ const getIssuesDebounced = debounce(async () => {
     return await fetchSortedIssues();
 }, 1000, { leading: true, trailing: true });
 
+// Daily tasks management
+async function loadDailyTasks() {
+    try {
+        const data = await fs.readFile('dailies.json', 'utf8');
+        return JSON.parse(data);
+    } catch (error) {
+        logger.error(`Error loading daily tasks: ${error.message}`);
+        return { tasks: [] };
+    }
+}
+
+async function saveDailyTasks(tasks) {
+    try {
+        await fs.writeFile('dailies.json', JSON.stringify({ tasks }, null, 2));
+    } catch (error) {
+        logger.error(`Error saving daily tasks: ${error.message}`);
+    }
+}
+
+// Reset daily tasks at midnight
+cron.schedule('0 0 * * *', async () => {
+    const dailyTasks = await loadDailyTasks();
+    dailyTasks.tasks = dailyTasks.tasks.map(task => ({ ...task, completed: false }));
+    await saveDailyTasks(dailyTasks.tasks);
+    logger.info('Daily tasks reset for new day');
+});
+
+// Handler for the /dailies command
+bot.onText(/\/dailies/, async (msg) => {
+    const chatId = msg.chat.id;
+    const dailyTasks = await loadDailyTasks();
+    
+    const keyboard = dailyTasks.tasks.map(task => ([{
+        text: `${task.completed ? '✅' : '⬜'} ${task.text}`,
+        callback_data: `toggle_daily_${task.id}`
+    }]));
+    
+    // Add management buttons
+    keyboard.push([
+        { text: '➕ Add Task', callback_data: 'add_daily' },
+        { text: '🗑️ Remove Task', callback_data: 'remove_daily' }
+    ]);
+
+    const message = '*📋 Daily Tasks:*\n\n' +
+        dailyTasks.tasks.map(task => 
+            `${task.completed ? '✅' : '⬜'} ${task.text}`
+        ).join('\n');
+
+    bot.sendMessage(chatId, message, {
+        parse_mode: 'Markdown',
+        reply_markup: {
+            inline_keyboard: keyboard
+        }
+    });
+});
+
+// Handle callback queries for daily tasks
+bot.on('callback_query', async (query) => {
+    const chatId = query.message.chat.id;
+    const messageId = query.message.message_id;
+    const data = query.data;
+
+    if (data.startsWith('toggle_daily_')) {
+        const taskId = data.replace('toggle_daily_', '');
+        const dailyTasks = await loadDailyTasks();
+        
+        const taskIndex = dailyTasks.tasks.findIndex(t => t.id === taskId);
+        if (taskIndex !== -1) {
+            dailyTasks.tasks[taskIndex].completed = !dailyTasks.tasks[taskIndex].completed;
+            await saveDailyTasks(dailyTasks.tasks);
+
+            // Update message with new state
+            const keyboard = dailyTasks.tasks.map(task => ([{
+                text: `${task.completed ? '✅' : '⬜'} ${task.text}`,
+                callback_data: `toggle_daily_${task.id}`
+            }]));
+            
+            keyboard.push([
+                { text: '➕ Add Task', callback_data: 'add_daily' },
+                { text: '🗑️ Remove Task', callback_data: 'remove_daily' }
+            ]);
+
+            const message = '*📋 Daily Tasks:*\n\n' +
+                dailyTasks.tasks.map(task => 
+                    `${task.completed ? '✅' : '⬜'} ${task.text}`
+                ).join('\n');
+
+            await bot.editMessageText(message, {
+                chat_id: chatId,
+                message_id: messageId,
+                parse_mode: 'Markdown',
+                reply_markup: {
+                    inline_keyboard: keyboard
+                }
+            });
+        }
+    } else if (data === 'add_daily') {
+        // Start add task conversation
+        await bot.sendMessage(chatId, 'Please enter the new daily task:');
+        // Store state that next message should be treated as new task
+        cache.set(`adding_daily_${chatId}`, true, 300); // 5 minute timeout
+    } else if (data === 'remove_daily') {
+        const dailyTasks = await loadDailyTasks();
+        const keyboard = dailyTasks.tasks.map(task => ([{
+            text: `🗑️ ${task.text}`,
+            callback_data: `delete_daily_${task.id}`
+        }]));
+
+        await bot.sendMessage(chatId, '*Select task to remove:*', {
+            parse_mode: 'Markdown',
+            reply_markup: {
+                inline_keyboard: keyboard
+            }
+        });
+    } else if (data.startsWith('delete_daily_')) {
+        const taskId = data.replace('delete_daily_', '');
+        const dailyTasks = await loadDailyTasks();
+        
+        dailyTasks.tasks = dailyTasks.tasks.filter(t => t.id !== taskId);
+        await saveDailyTasks(dailyTasks.tasks);
+        
+        await bot.sendMessage(chatId, 'Task removed! Use /dailies to see updated list.');
+    }
+
+    // Answer callback query to remove loading state
+    await bot.answerCallbackQuery(query.id);
+});
+
+// Handle new task messages
+bot.on('message', async (msg) => {
+    const chatId = msg.chat.id;
+    const isAddingDaily = cache.get(`adding_daily_${chatId}`);
+
+    if (isAddingDaily && msg.text && !msg.text.startsWith('/')) {
+        const dailyTasks = await loadDailyTasks();
+        const newId = (Math.max(...dailyTasks.tasks.map(t => parseInt(t.id)), 0) + 1).toString();
+        
+        dailyTasks.tasks.push({
+            id: newId,
+            text: msg.text,
+            completed: false
+        });
+
+        await saveDailyTasks(dailyTasks.tasks);
+        cache.del(`adding_daily_${chatId}`);
+        
+        await bot.sendMessage(chatId, 'Task added! Use /dailies to see updated list.');
+    }
+});
+
 // Handler for the /help command
 bot.onText(/\/help/, (msg) => {
     const chatId = msg.chat.id;
@@ -264,6 +418,9 @@ bot.onText(/\/help/, (msg) => {
 
     const helpMessage = `
 🤖 *Available Commands:*
+
+📝 *Daily Tasks*
+/dailies - Manage your daily tasks
 
 📋 *Task Management*
 /issues - Show top 10 active tasks (in progress & todo)
@@ -334,8 +491,14 @@ bot.onText(/\/status/, async (msg) => {
             })
             .join('\n');
 
+        // Get daily tasks
+        const dailyTasks = await loadDailyTasks();
+        const dailiesFormatted = dailyTasks.tasks
+            .map(task => `${task.completed ? '✅' : '⬜'} ${task.text}`)
+            .join('\n');
+
         const statusMessage = `
-📊 *TranslateMom Cycle Overview*
+📊 *${PROJECT_NAME} Cycle Overview*
 
 🏃 In Progress: ${statusData.inProgress} tasks
 📋 Todo: ${statusData.todo} tasks
@@ -343,6 +506,9 @@ bot.onText(/\/status/, async (msg) => {
 📝 Backlog: ${statusData.backlog} tasks
 ━━━━━━━━━━━━━━━━
 📈 Total: ${statusData.total} tasks
+
+📋 *Daily Tasks:*
+${dailiesFormatted || "No daily tasks set"}
 
 📅 *Updated Today (${statusData.todayIssues.length} issues):*
 ${todayIssuesFormatted || "No issues updated today"}
@@ -450,7 +616,7 @@ bot.onText(/\/stats/, async (msg) => {
         };
 
         const statsMessage = `
-📊 *TranslateMom Dev Cycle Statistics*
+📊 *${PROJECT_NAME} Dev Cycle Statistics*
 
 *Priority Distribution:*
 🔴 Urgent: ${priorities.urgent}
@@ -633,16 +799,25 @@ ${issueLines.join('\n')}`;
         }
 
         // Send combined status update
+        // Get daily tasks
+        const dailyTasks = await loadDailyTasks();
+        const dailiesFormatted = dailyTasks.tasks
+            .map(task => `${task.completed ? '✅' : '⬜'} ${task.text}`)
+            .join('\n');
+
         const statusMessage = `
 🌙 *Evening Status Report*
 
-📊 *Current TranslateMom Dev Cycle Status:*
+📊 *Current ${PROJECT_NAME} Dev Cycle Status:*
 🏃 In Progress: ${statusData.inProgress} tasks
 📋 Todo: ${statusData.todo} tasks
 ✅ Completed: ${statusData.done} tasks
 📝 Backlog: ${statusData.backlog} tasks
 ━━━━━━━━━━━━━━━━
 📈 Total: ${statusData.total} tasks
+
+📋 *Daily Tasks Progress:*
+${dailiesFormatted || "No daily tasks set"}
 
 📅 *Updated Today (${statusData.todayIssues.length} issues):*
 ${todayIssuesFormatted || "No issues updated today"}${activeIssuesSection}`;
